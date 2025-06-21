@@ -31,6 +31,14 @@ type User struct {
 	Email     string    `json:"email"`
 }
 
+type chirp struct {
+	ID        uuid.UUID `json:"id"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -76,39 +84,6 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(body))
 }
 
-func (cfg *apiConfig) validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	type chirp struct {
-		Body string `json:"body"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	msg := chirp{}
-	err := decoder.Decode(&msg)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(500)
-		resp := map[string]string{"error": "Something went wrong"}
-		dat, _ := json.Marshal(resp)
-		w.Write(dat)
-		return
-	}
-	if len(msg.Body) > 140 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-
-		resp := map[string]string{"error": "Chirp is too long"}
-		dat, _ := json.Marshal(resp)
-		w.Write(dat)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-
-	resp := map[string]string{"cleaned_body": profanityScrubber(msg.Body)}
-	dat, _ := json.Marshal(resp)
-	w.Write(dat)
-}
-
 func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
 	type userRequest struct {
 		Email string `json:"email"`
@@ -145,6 +120,139 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(201)
 	resp, _ := json.Marshal(user)
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
+
+	decoder := json.NewDecoder(r.Body)
+	msg := chirp{}
+	err := decoder.Decode(&msg)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+	if len(msg.Body) > 140 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+
+		resp := map[string]string{"error": "Chirp is too long"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	msg.Body = profanityScrubber(msg.Body)
+
+	dbChirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   msg.Body,
+		UserID: msg.UserID,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong creating chirp in the database"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	chirp := chirp{
+		ID:        dbChirp.ID,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(201)
+	resp, _ := json.Marshal(chirp)
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	dbchirps, err := cfg.DB.GetChirps(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong getting chirps from the database"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	var chirps []chirp
+	for _, dbChirp := range dbchirps {
+		chirp := chirp{
+			ID:        dbChirp.ID,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+		}
+		chirps = append(chirps, chirp)
+	}
+
+	chirpsjson, err := json.Marshal(chirps)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Failed to marshal chirps"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write(chirpsjson)
+}
+
+func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("chirpID")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(400)
+		resp := map[string]string{"error": "Invalid chirp ID"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	dbchirp, err := cfg.DB.GetChirpByID(r.Context(), id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err == sql.ErrNoRows {
+			w.WriteHeader(404)
+			resp := map[string]string{"error": "Chirp not found"}
+			dat, _ := json.Marshal(resp)
+			w.Write(dat)
+			return
+		}
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong getting chirp from the database"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	chirp := chirp{
+		ID:        dbchirp.ID,
+		Body:      dbchirp.Body,
+		UserID:    dbchirp.UserID,
+		CreatedAt: dbchirp.CreatedAt,
+		UpdatedAt: dbchirp.UpdatedAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	resp, _ := json.Marshal(chirp)
 	w.Write(resp)
 }
 
@@ -205,8 +313,10 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 	mux.HandleFunc("GET /admin/metrics", cfg.fileserverHitsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", cfg.validateChirpHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpByIDHandler)
+	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 
 	err = srv.ListenAndServe()
 	if err != nil {
