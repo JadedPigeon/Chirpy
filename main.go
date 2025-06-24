@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+	JWTSecret      string
 }
 
 type User struct {
@@ -31,6 +33,14 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+}
+
+type userLoginResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 type chirp struct {
@@ -41,9 +51,14 @@ type chirp struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type chirpRequest struct {
+	Body string `json:"body"`
+}
+
 type userRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	Expiration string `json:"expires_in_seconds"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -141,18 +156,38 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
-
 	decoder := json.NewDecoder(r.Body)
-	msg := chirp{}
+	msg := chirpRequest{}
 	err := decoder.Decode(&msg)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(500)
-		resp := map[string]string{"error": "Something went wrong"}
+		resp := map[string]string{"error": "Invalid chirp format"}
 		dat, _ := json.Marshal(resp)
 		w.Write(dat)
 		return
 	}
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Invalid token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, cfg.JWTSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Token not tied to a user"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
 	if len(msg.Body) > 140 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(400)
@@ -167,7 +202,7 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 
 	dbChirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   msg.Body,
-		UserID: msg.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -307,11 +342,29 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := User{
+	expiration := 3600 // default to 1 hour
+	if req.Expiration != "" {
+		if exp, err := strconv.Atoi(req.Expiration); err == nil && exp > 0 && exp <= 3600 {
+			expiration = exp
+		}
+	}
+
+	token, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret, time.Duration(expiration)*time.Second)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Could not create token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	user := userLoginResponse{
 		ID:        dbUser.ID,
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		Token:     token,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -343,6 +396,7 @@ func profanityScrubber(s string) string {
 func main() {
 	godotenv.Load()
 	platform := os.Getenv("PLATFORM")
+	secret := os.Getenv("JWT_SECRET")
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -358,6 +412,7 @@ func main() {
 	dbQueries := database.New(db)
 	cfg.DB = dbQueries
 	cfg.Platform = platform
+	cfg.JWTSecret = secret
 
 	mux := http.NewServeMux()
 
