@@ -12,12 +12,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/JadedPigeon/Chirpy/internal/auth"
 	"github.com/JadedPigeon/Chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
+// Structs
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
@@ -37,6 +39,11 @@ type chirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type userRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -85,9 +92,6 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
-	type userRequest struct {
-		Email string `json:"email"`
-	}
 	var req userRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -99,7 +103,20 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	dbUser, err := cfg.DB.CreateUser(r.Context(), req.Email)
+	hashed, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong hasing password"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	dbUser, err := cfg.DB.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          req.Email,
+		HashedPassword: hashed,
+	})
 
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -256,6 +273,53 @@ func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request
 	w.Write(resp)
 }
 
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	var req userRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong logging in user"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	dbUser, err := cfg.DB.FindUserByEmail(r.Context(), req.Email)
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Incorrect email or password"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	hash := dbUser.HashedPassword
+	err = auth.CheckPasswordHash(req.Password, hash)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Incorrect email or password"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	resp, _ := json.Marshal(user)
+	w.Write(resp)
+}
+
 // Helper functions
 func profanityScrubber(s string) string {
 	badwords := []string{
@@ -317,6 +381,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpByIDHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
+	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 
 	err = srv.ListenAndServe()
 	if err != nil {
