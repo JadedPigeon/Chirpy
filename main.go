@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,11 +35,12 @@ type User struct {
 }
 
 type userLoginResponse struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 type chirp struct {
@@ -56,9 +56,9 @@ type chirpRequest struct {
 }
 
 type userRequest struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	Expiration string `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	//Expiration string `json:"expires_in_seconds"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -342,14 +342,9 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiration := 3600 // default to 1 hour
-	if req.Expiration != "" {
-		if exp, err := strconv.Atoi(req.Expiration); err == nil && exp > 0 && exp <= 3600 {
-			expiration = exp
-		}
-	}
+	expiration := time.Duration(3600) * time.Second
 
-	token, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret, time.Duration(expiration)*time.Second)
+	token, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret, expiration)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(401)
@@ -359,18 +354,127 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	refreshToken, err := auth.MakeRefreshToken()
+	refreshExpiresAt := time.Now().Add(60 * 24 * time.Hour)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Could not create refresh token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+	dbRefreshToken, err := cfg.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		RefreshToken: refreshToken,
+		UserID:       dbUser.ID,
+		ExpiresAt:    refreshExpiresAt,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Could not insert refresh token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
 	user := userLoginResponse{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-		Token:     token,
+		ID:           dbUser.ID,
+		CreatedAt:    dbUser.CreatedAt,
+		UpdatedAt:    dbUser.UpdatedAt,
+		Email:        dbUser.Email,
+		Token:        token,
+		RefreshToken: dbRefreshToken.RefreshToken,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
 	resp, _ := json.Marshal(user)
 	w.Write(resp)
+}
+
+func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Invalid or missing refresh token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	dbRefreshToken, err := cfg.DB.FindRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Refresh token not found"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	if dbRefreshToken.RevokedAt.Valid {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Refresh token revoked"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	// Check if expired
+	if time.Now().After(dbRefreshToken.ExpiresAt) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Refresh token expired"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	// Issue new JWT
+	expiration := time.Duration(3600) * time.Second
+	token, err := auth.MakeJWT(dbRefreshToken.UserID, cfg.JWTSecret, expiration)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Could not create token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	resp := map[string]string{"token": token}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	dat, _ := json.Marshal(resp)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Invalid or missing refresh token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	_, err = cfg.DB.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Refresh token not found"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	return
 }
 
 // Helper functions
@@ -437,6 +541,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpByIDHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
+	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
+	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
 
 	err = srv.ListenAndServe()
 	if err != nil {
