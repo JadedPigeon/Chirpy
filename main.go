@@ -32,6 +32,7 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	ChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type userLoginResponse struct {
@@ -41,6 +42,7 @@ type userLoginResponse struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	ChirpyRed    bool      `json:"is_chirpy_red"`
 }
 
 type userUpdateRequest struct {
@@ -64,6 +66,13 @@ type userRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	//Expiration string `json:"expires_in_seconds"`
+}
+
+type upgradeUserToChirpyRedRequest struct {
+	Event string `json:"event"`
+	Data  struct {
+		UserId uuid.UUID `json:"user_id"`
+	}
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -152,6 +161,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		ChirpyRed: dbUser.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -222,6 +232,7 @@ func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) 
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		ChirpyRed: dbUser.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -531,6 +542,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email:        dbUser.Email,
 		Token:        token,
 		RefreshToken: dbRefreshToken.RefreshToken,
+		ChirpyRed:    dbUser.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -622,6 +634,50 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (cfg *apiConfig) upgradeUserToChirpyRedHandler(w http.ResponseWriter, r *http.Request) {
+	var req upgradeUserToChirpyRedRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(400)
+		resp := map[string]string{"error": "Invalid request format"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	if req.Event != "user.upgraded" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(204)
+		resp := map[string]string{"error": "Invalid event type"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	userID := req.Data.UserId
+	if userID == uuid.Nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(400)
+		resp := map[string]string{"error": "Missing user ID"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	_, err = cfg.DB.UpgradeUserToChirpyRed(r.Context(), userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Failed to upgrade user to Chirpy Red"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Helper functions
 func profanityScrubber(s string) string {
 	badwords := []string{
@@ -690,6 +746,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
 	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.upgradeUserToChirpyRedHandler)
 
 	err = srv.ListenAndServe()
 	if err != nil {
