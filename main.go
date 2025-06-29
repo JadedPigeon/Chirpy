@@ -43,6 +43,11 @@ type userLoginResponse struct {
 	RefreshToken string    `json:"refresh_token"`
 }
 
+type userUpdateRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 type chirp struct {
 	ID        uuid.UUID `json:"id"`
 	Body      string    `json:"body"`
@@ -122,7 +127,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(500)
-		resp := map[string]string{"error": "Something went wrong hasing password"}
+		resp := map[string]string{"error": "Something went wrong hashing password"}
 		dat, _ := json.Marshal(resp)
 		w.Write(dat)
 		return
@@ -151,6 +156,76 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(201)
+	resp, _ := json.Marshal(user)
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Invalid token"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, cfg.JWTSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Token not tied to a user"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var req userUpdateRequest
+	err = decoder.Decode(&req)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Invalid user update format"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	hashed, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong hashing password"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	dbUser, err := cfg.DB.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          req.Email,
+		HashedPassword: hashed,
+		ID:             userID,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(500)
+		resp := map[string]string{"error": "Something went wrong creating user in the database"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
 	resp, _ := json.Marshal(user)
 	w.Write(resp)
 }
@@ -432,7 +507,7 @@ func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
 		w.Write(dat)
 		return
 	}
-	// streak protection
+
 	// Issue new JWT
 	expiration := time.Duration(3600) * time.Second
 	token, err := auth.MakeJWT(dbRefreshToken.UserID, cfg.JWTSecret, expiration)
@@ -537,6 +612,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.fileserverHitsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("PUT /api/users", cfg.updateUserHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpByIDHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
