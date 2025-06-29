@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -386,26 +387,68 @@ func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	dbchirps, err := cfg.DB.GetChirps(r.Context())
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(500)
-		resp := map[string]string{"error": "Something went wrong getting chirps from the database"}
-		dat, _ := json.Marshal(resp)
-		w.Write(dat)
-		return
+	authorID := r.URL.Query().Get("author_id")
+	sortOrder := r.URL.Query().Get("sort")
+	var chirps []chirp
+
+	if authorID != "" {
+		authorUUID, err := uuid.Parse(authorID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(400)
+			resp := map[string]string{"error": "Invalid author_id format"}
+			dat, _ := json.Marshal(resp)
+			w.Write(dat)
+			return
+		}
+		dbchirps, dbErr := cfg.DB.GetChirpsByUserID(r.Context(), authorUUID)
+		if dbErr != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(500)
+			resp := map[string]string{"error": "Something went wrong getting chirps from the database"}
+			dat, _ := json.Marshal(resp)
+			w.Write(dat)
+			return
+		}
+		for _, dbChirp := range dbchirps {
+			chirps = append(chirps, chirp{
+				ID:        dbChirp.ID,
+				Body:      dbChirp.Body,
+				UserID:    dbChirp.UserID,
+				CreatedAt: dbChirp.CreatedAt,
+				UpdatedAt: dbChirp.UpdatedAt,
+			})
+		}
+	} else {
+		dbchirps, dbErr := cfg.DB.GetChirps(r.Context())
+		if dbErr != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(500)
+			resp := map[string]string{"error": "Something went wrong getting chirps from the database"}
+			dat, _ := json.Marshal(resp)
+			w.Write(dat)
+			return
+		}
+		for _, dbChirp := range dbchirps {
+			chirps = append(chirps, chirp{
+				ID:        dbChirp.ID,
+				Body:      dbChirp.Body,
+				UserID:    dbChirp.UserID,
+				CreatedAt: dbChirp.CreatedAt,
+				UpdatedAt: dbChirp.UpdatedAt,
+			})
+		}
 	}
 
-	var chirps []chirp
-	for _, dbChirp := range dbchirps {
-		chirp := chirp{
-			ID:        dbChirp.ID,
-			Body:      dbChirp.Body,
-			UserID:    dbChirp.UserID,
-			CreatedAt: dbChirp.CreatedAt,
-			UpdatedAt: dbChirp.UpdatedAt,
-		}
-		chirps = append(chirps, chirp)
+	// Default sort order is ascending
+	if sortOrder == "desc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[j].CreatedAt.Before(chirps[i].CreatedAt)
+		})
+	} else {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+		})
 	}
 
 	chirpsjson, err := json.Marshal(chirps)
