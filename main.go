@@ -25,6 +25,7 @@ type apiConfig struct {
 	DB             *database.Queries
 	Platform       string
 	JWTSecret      string
+	polkaKey       string
 }
 
 type User struct {
@@ -635,8 +636,18 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) upgradeUserToChirpyRedHandler(w http.ResponseWriter, r *http.Request) {
+	polka_key, err := auth.GetAPIKey(r.Header)
+	if err != nil || polka_key != cfg.polkaKey {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(401)
+		resp := map[string]string{"error": "Invalid or missing API key"}
+		dat, _ := json.Marshal(resp)
+		w.Write(dat)
+		return
+	}
+
 	var req upgradeUserToChirpyRedRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+	err = json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(400)
@@ -703,6 +714,7 @@ func main() {
 	platform := os.Getenv("PLATFORM")
 	secret := os.Getenv("JWT_SECRET")
 	dbURL := os.Getenv("DB_URL")
+	POLKAKey := os.Getenv("POLKA_KEY")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("Error loading db: ", err)
@@ -718,6 +730,7 @@ func main() {
 	cfg.DB = dbQueries
 	cfg.Platform = platform
 	cfg.JWTSecret = secret
+	cfg.polkaKey = POLKAKey
 
 	mux := http.NewServeMux()
 
