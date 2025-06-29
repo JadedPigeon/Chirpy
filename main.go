@@ -432,7 +432,7 @@ func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
 		w.Write(dat)
 		return
 	}
-
+	// streak protection
 	// Issue new JWT
 	expiration := time.Duration(3600) * time.Second
 	token, err := auth.MakeJWT(dbRefreshToken.UserID, cfg.JWTSecret, expiration)
